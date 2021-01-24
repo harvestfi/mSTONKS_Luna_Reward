@@ -10,6 +10,7 @@ const VAULTABI = require("./ABI/VAULT.json");
 const web3 = new Web3(process.env.INFURAKEY);
 BigNumber.config({
   EXPONENTIAL_AT: [-100, 100],
+  ROUNDING_MODE: 1,
 });
 const isSameAddress = (a, b) => {
   return a.toLowerCase() === b.toLowerCase();
@@ -33,8 +34,20 @@ const mSTONKSPools = [
   },
 ];
 const totalLuna = 27364;
-const lunaAddress = "0xd2877702675e6ceb975b4a1dff9fb7baf4c91ea9";
+// const lunaAddress = "0xd2877702675e6ceb975b4a1dff9fb7baf4c91ea9";
 const lunaPerPool = totalLuna / mSTONKSPools.length;
+
+const loadLastReward = () => {
+  try {
+    return JSON.parse(require("./LastUpdated/last-reward-in.json"));
+  } catch {
+    return {
+      lastBlock: 0,
+      lastBlockTimestamp: 0,
+      stake: {},
+    };
+  }
+};
 
 const main = async () => {
   const precision = 5;
@@ -48,56 +61,140 @@ const main = async () => {
     mSTONKSPools[i].balance = balance;
     i++;
   }
-  let rewardList = {};
-  mSTONKSPools.forEach(async ({ address: pool, name, balance }) => {
-    rewardList[pool] = {};
-    const apiURL = `https://api.etherscan.io/api?module=account&action=tokentx&address=${pool}&startblock=0&endblock=latest&sort=asc&apikey=${process.env.ETHERSCAN_APIKEY}`;
-    const {
-      data: { result },
-    } = await axios.get(apiURL);
-    result.forEach((txn) => {
-      const { from, to, value, tokenSymbol, hash } = txn;
-      if (isSameAddress(to, pool) && tokenSymbol === "fUNI-V2") {
-        //lp deposit action
-        if (_.isEmpty(rewardList[pool][from]))
-          rewardList[pool][from] = new BigNumber(0);
-        rewardList[pool][from] = new BigNumber(rewardList[pool][from]).plus(
-          value
-        );
-      } else if (isSameAddress(from, pool) && tokenSymbol === "fUNI-V2") {
-        //withdraw action
-        rewardList[pool][to] = new BigNumber(rewardList[pool][to]).minus(value);
-      }
-    });
 
-    //rewards analyze report
+  const { lastBlock, lastBlockTimestamp, stake } = loadLastReward();
+  let rewardPool = {};
+  let stakeAmount = {};
+
+  const latestBlock = await web3.eth.getBlockNumber();
+  const { timestamp: latestBlockTimestamp } = await web3.eth.getBlock(
+    latestBlock
+  );
+  const period = latestBlockTimestamp - lastBlockTimestamp;
+  const unitReward = new BigNumber(lunaPerPool).dividedBy(period);
+
+  for (const { address: pool, name, balance, lpToken } of mSTONKSPools) {
+    let rewardTimeSum = period;
+    rewardPool[pool] = {};
+    let prevTimeStamp = lastBlockTimestamp;
+    stakeAmount[pool] = stake[pool] || {};
+
+    let stakeSum = new BigNumber(0); // total stake amount
+    for (const [_, amount] of Object.entries(stakeAmount[pool])) {
+      stakeSum = stakeSum.plus(amount);
+    }
+
+    for (let page = 1; ; page++) {
+      const apiURL = `https://api.etherscan.io/api?module=account&action=tokentx&contractAddress=${lpToken}&address=${pool}&page=${page}&offset=5000&startblock=${
+        lastBlock + 1
+      }&endblock=${latestBlock}&sort=asc&apikey=${
+        process.env.ETHERSCAN_APIKEY
+      }`;
+      const {
+        data: { result },
+      } = await axios.get(apiURL);
+
+      for (const txn of result) {
+        const { from, to, value, tokenSymbol, blockNumber } = txn;
+        const timeStamp = parseInt(txn.timeStamp);
+
+        if (timeStamp > prevTimeStamp) {
+          if (stakeSum.isZero()) {
+            rewardTimeSum -= timeStamp - prevTimeStamp;
+          } else {
+            const reward = unitReward.multipliedBy(timeStamp - prevTimeStamp);
+
+            for (const [address, amount] of Object.entries(stakeAmount[pool])) {
+              rewardPool[pool][address] = new BigNumber(
+                rewardPool[pool][address] || 0
+              ).plus(amount.dividedBy(stakeSum).multipliedBy(reward));
+            }
+          }
+        }
+
+        if (isSameAddress(to, pool) && tokenSymbol === "fUNI-V2") {
+          //lp deposit action
+          stakeAmount[pool][from] = new BigNumber(
+            stakeAmount[pool][from] || 0
+          ).plus(value);
+          stakeSum = stakeSum.plus(value);
+        } else if (isSameAddress(from, pool) && tokenSymbol === "fUNI-V2") {
+          //withdraw action
+          stakeAmount[pool][to] = new BigNumber(
+            stakeAmount[pool][to] || 0
+          ).minus(value);
+          stakeSum = stakeSum.minus(value);
+        }
+
+        prevTimeStamp = timeStamp;
+      }
+
+      if (!result.length) {
+        break;
+      }
+    }
+
+    for (const [address, amount] of Object.entries(stakeAmount[pool])) {
+      rewardPool[pool][address] = new BigNumber(
+        rewardPool[pool][address] || 0
+      ).plus(
+        amount
+          .dividedBy(stakeSum)
+          .multipliedBy(
+            unitReward.multipliedBy(latestBlockTimestamp - prevTimeStamp)
+          )
+      );
+    }
+    for (const [address, amount] of Object.entries(rewardPool[pool])) {
+      rewardPool[pool][address] = amount
+        .multipliedBy(period)
+        .dividedBy(rewardTimeSum);
+    }
+
+    console.log("pool: ", pool);
+    console.log("latestBlock: ", latestBlock);
+    console.log("latestBlockTimestamp: ", latestBlockTimestamp);
+    console.log("stakeAmount");
+    for (const [address, amount] of Object.entries(stakeAmount[pool])) {
+      console.log(
+        `address: ${address}, amount: ${web3.utils.fromWei(amount.toFixed(0))}`
+      );
+    }
+    console.log("stakeSum", web3.utils.fromWei(stakeSum.toFixed(0)));
+
+    console.log("rewardPool");
+    for (const [address, amount] of Object.entries(rewardPool[pool])) {
+      console.log(`address: ${address}, amount: ${amount.toString()}`);
+    }
+
+    let rewardPoolSum = new BigNumber(0); // total stake amount
+    for (const [_, amount] of Object.entries(rewardPool[pool])) {
+      rewardPoolSum = rewardPoolSum.plus(amount);
+    }
+    console.log("rewardPoolSum", rewardPoolSum.toString());
+
     let analyze = [],
       multisend = [];
-    Object.keys(rewardList[pool]).forEach((key) => {
-      if (!rewardList[pool][key].isZero()) {
-        const percentage = new BigNumber(rewardList[pool][key])
-          .dividedBy(balance)
+    Object.keys(rewardPool[pool]).forEach((key) => {
+      if (!rewardPool[pool][key].isZero()) {
+        const percentage = new BigNumber(rewardPool[pool][key])
+          .dividedBy(rewardPoolSum)
           .multipliedBy(100);
         analyze.push({
           name,
           pool,
           key,
-          deposit: web3.utils.fromWei(rewardList[pool][key].toFixed(0)),
-          percentage: `${percentage.toFixed(2, 1)}%`,
-          reward: new BigNumber(rewardList[pool][key])
-            .dividedBy(balance)
-            .multipliedBy(lunaPerPool)
-            .toString(),
+          deposit: web3.utils.fromWei(stakeAmount[pool][key].toFixed(0)),
+          percentage: `${percentage.toFixed(4, 0)}%`,
+          reward: rewardPool[pool][key].toString(),
         });
         multisend.push({
           key,
-          reward: new BigNumber(rewardList[pool][key])
-            .dividedBy(balance)
-            .multipliedBy(lunaPerPool)
-            .toFixed(precision, 1),
+          reward: rewardPool[pool][key].toFixed(precision, 1),
         });
       }
     });
+
     jsonexport(
       analyze,
       {
@@ -112,34 +209,61 @@ const main = async () => {
       },
       function (err, csv) {
         if (err) return console.error(err);
-        const name = `Rewards-${name}.csv`;
-        fs.writeFile(`Analyze/${name}`, csv, "utf8", function (err) {
-          if (err) {
-            console.log(
-              `Some error occured - ${name} file either not saved or corrupted file saved.`
-            );
-          } else {
-            console.log(`Rewards-${name}.csv saved!`);
+        fs.writeFile(
+          `Analyze/Rewards-${name}.csv`,
+          csv,
+          "utf8",
+          function (err) {
+            if (err) {
+              console.log(
+                `Some error occured - Rewards-${name}.csv file either not saved or corrupted file saved.`
+              );
+            } else {
+              console.log(`Rewards-${name}.csv saved!`);
+            }
           }
-        });
+        );
       }
     );
 
     //multisender csv
     jsonexport(multisend, { includeHeaders: false }, function (err, csv) {
       if (err) return console.error(err);
-      const name = `Multisend-${name}.csv`;
-      fs.writeFile(`Multisend/${name}`, csv, "utf8", function (err) {
-        if (err) {
-          console.log(
-            `Some error occured - ${name} file either not saved or corrupted file saved.`
-          );
-        } else {
-          console.log(`Multisend-${name}.csv saved!`);
+      fs.writeFile(
+        `Multisend/Multisend-${name}.csv`,
+        csv,
+        "utf8",
+        function (err) {
+          if (err) {
+            console.log(
+              `Some error occured - Multisend-${name}.csv file either not saved or corrupted file saved.`
+            );
+          } else {
+            console.log(`Multisend-${name}.csv saved!`);
+          }
         }
-      });
+      );
     });
-  });
+  }
+
+  fs.writeFile(
+    "LastUpdated/last-reward-out.json",
+    JSON.stringify({
+      lastBlock: latestBlock,
+      lastBlockTimestamp: latestBlockTimestamp,
+      stake: stakeAmount,
+    }),
+    "utf8",
+    function (err) {
+      if (err) {
+        console.log(
+          "Some error occured - last-reward-out.json file either not saved or corrupted file saved."
+        );
+      } else {
+        console.log("last-reward-out.json saved!");
+      }
+    }
+  );
 };
 
 main();
