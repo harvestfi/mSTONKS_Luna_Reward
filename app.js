@@ -34,23 +34,15 @@ const mSTONKSPools = [
   },
 ];
 const totalLuna = 27364;
-// const lunaAddress = "0xd2877702675e6ceb975b4a1dff9fb7baf4c91ea9";
-const lunaPerPool = totalLuna / mSTONKSPools.length;
-
-const loadLastReward = () => {
-  try {
-    return JSON.parse(require("./LastUpdated/last-reward-in.json"));
-  } catch {
-    return {
-      lastBlock: 0,
-      lastBlockTimestamp: 0,
-      stake: {},
-    };
-  }
-};
+const weeks = 4;
+const lunaPerPool = totalLuna / mSTONKSPools.length / weeks;
 
 const main = async () => {
   const precision = 5;
+  const latestBlock = 11733131; //change this block to tuesday
+  const lastBlock = 0,
+    lastBlockTimestamp = 0,
+    stake = {};
   let i = 0;
   for (let _pool of mSTONKSPools) {
     const poolContract = new web3.eth.Contract(POOLABI, _pool.address);
@@ -62,11 +54,10 @@ const main = async () => {
     i++;
   }
 
-  const { lastBlock, lastBlockTimestamp, stake } = loadLastReward();
   let rewardPool = {};
   let stakeAmount = {};
 
-  const latestBlock = await web3.eth.getBlockNumber();
+  // const latestBlock = await web3.eth.getBlockNumber();
   const { timestamp: latestBlockTimestamp } = await web3.eth.getBlock(
     latestBlock
   );
@@ -245,25 +236,6 @@ const main = async () => {
       );
     });
   }
-
-  fs.writeFile(
-    "LastUpdated/last-reward-out.json",
-    JSON.stringify({
-      lastBlock: latestBlock,
-      lastBlockTimestamp: latestBlockTimestamp,
-      stake: stakeAmount,
-    }),
-    "utf8",
-    function (err) {
-      if (err) {
-        console.log(
-          "Some error occured - last-reward-out.json file either not saved or corrupted file saved."
-        );
-      } else {
-        console.log("last-reward-out.json saved!");
-      }
-    }
-  );
 };
 
 main();
