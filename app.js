@@ -145,27 +145,10 @@ const main = async () => {
         .dividedBy(rewardTimeSum);
     }
 
-    console.log("pool: ", pool);
-    console.log("endBlock: ", endBlock);
-    console.log("endBlockTimestamp: ", endBlockTimestamp);
-    console.log("stakeAmount");
-    for (const [address, amount] of Object.entries(stakeAmount[pool])) {
-      console.log(
-        `address: ${address}, amount: ${web3.utils.fromWei(amount.toFixed(0))}`
-      );
-    }
-    console.log("stakeSum", web3.utils.fromWei(stakeSum.toFixed(0)));
-
-    console.log("rewardPool");
-    for (const [address, amount] of Object.entries(rewardPool[pool])) {
-      console.log(`address: ${address}, amount: ${amount.toString()}`);
-    }
-
     let rewardPoolSum = new BigNumber(0); // total stake amount
     for (const [_, amount] of Object.entries(rewardPool[pool])) {
       rewardPoolSum = rewardPoolSum.plus(amount);
     }
-    console.log("rewardPoolSum", rewardPoolSum.toString());
 
     let analyze = [],
       multisend = [];
