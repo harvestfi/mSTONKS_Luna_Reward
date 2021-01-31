@@ -34,23 +34,27 @@ const mSTONKSPools = [
   },
 ];
 const totalLuna = 27364;
-// const lunaAddress = "0xd2877702675e6ceb975b4a1dff9fb7baf4c91ea9";
-const lunaPerPool = totalLuna / mSTONKSPools.length;
+const weeks = 4;
+const lunaPerPool = totalLuna / mSTONKSPools.length / weeks;
 
-const loadLastReward = () => {
-  try {
-    return JSON.parse(require("./LastUpdated/last-reward-in.json"));
-  } catch {
-    return {
-      lastBlock: 0,
-      lastBlockTimestamp: 0,
-      stake: {},
-    };
+const updateRewardFromStakeAmount = (stakeAmount, rewardPool, rate) => {
+  for (const [address, amount] of Object.entries(stakeAmount)) {
+    rewardPool[address] = new BigNumber(rewardPool[address] || 0).plus(
+      amount.dividedBy(rate)
+    );
   }
+  return rewardPool;
 };
 
 const main = async () => {
   const precision = 5;
+  const startBlock = 11688056;
+  const endBlock = 11761138;
+  const { timestamp: startBlockTimestamp } = await web3.eth.getBlock(
+    startBlock
+  );
+  const { timestamp: endBlockTimestamp } = await web3.eth.getBlock(endBlock);
+
   let i = 0;
   for (let _pool of mSTONKSPools) {
     const poolContract = new web3.eth.Contract(POOLABI, _pool.address);
@@ -62,34 +66,23 @@ const main = async () => {
     i++;
   }
 
-  const { lastBlock, lastBlockTimestamp, stake } = loadLastReward();
-  let rewardPool = {};
-  let stakeAmount = {};
+  let rewardPool = {}; // reward amount per pool
+  let stakeAmount = {}; // reward amount per pool
 
-  const latestBlock = await web3.eth.getBlockNumber();
-  const { timestamp: latestBlockTimestamp } = await web3.eth.getBlock(
-    latestBlock
-  );
-  const period = latestBlockTimestamp - lastBlockTimestamp;
-  const unitReward = new BigNumber(lunaPerPool).dividedBy(period);
+  const period = endBlockTimestamp - startBlockTimestamp; // total period
+  const unitReward = new BigNumber(lunaPerPool).dividedBy(period); // unit reward amount
 
   for (const { address: pool, name, balance, lpToken } of mSTONKSPools) {
-    let rewardTimeSum = period;
-    rewardPool[pool] = {};
-    let prevTimeStamp = lastBlockTimestamp;
-    stakeAmount[pool] = stake[pool] || {};
+    rewardPool[pool] = {}; // reward amount per address
+    stakeAmount[pool] = {}; // stake amount per address
 
+    let prevTimeStamp = startBlockTimestamp;
+    let rewardTimeSum = period; // total reward calculated period (due to 0 stake amount period)
     let stakeSum = new BigNumber(0); // total stake amount
-    for (const [_, amount] of Object.entries(stakeAmount[pool])) {
-      stakeSum = stakeSum.plus(amount);
-    }
 
     for (let page = 1; ; page++) {
-      const apiURL = `https://api.etherscan.io/api?module=account&action=tokentx&contractAddress=${lpToken}&address=${pool}&page=${page}&offset=5000&startblock=${
-        lastBlock + 1
-      }&endblock=${latestBlock}&sort=asc&apikey=${
-        process.env.ETHERSCAN_APIKEY
-      }`;
+      // deposit/withdraw transactions from etherscan API.
+      const apiURL = `https://api.etherscan.io/api?module=account&action=tokentx&contractAddress=${lpToken}&address=${pool}&page=${page}&offset=5000&endblock=${endBlock}&sort=asc&apikey=${process.env.ETHERSCAN_APIKEY}`;
       const {
         data: { result },
       } = await axios.get(apiURL);
@@ -99,34 +92,34 @@ const main = async () => {
         const timeStamp = parseInt(txn.timeStamp);
 
         if (timeStamp > prevTimeStamp) {
+          // calculate reward (prevTimeStamp ~ timeStamp)
           if (stakeSum.isZero()) {
-            rewardTimeSum -= timeStamp - prevTimeStamp;
+            rewardTimeSum -= timeStamp - prevTimeStamp; // remove 0 stake amount period
           } else {
-            const reward = unitReward.multipliedBy(timeStamp - prevTimeStamp);
-
-            for (const [address, amount] of Object.entries(stakeAmount[pool])) {
-              rewardPool[pool][address] = new BigNumber(
-                rewardPool[pool][address] || 0
-              ).plus(amount.dividedBy(stakeSum).multipliedBy(reward));
-            }
+            updateRewardFromStakeAmount(
+              stakeAmount[pool],
+              rewardPool[pool],
+              stakeSum.dividedBy(
+                unitReward.multipliedBy(timeStamp - prevTimeStamp)
+              )
+            );
           }
+          prevTimeStamp = timeStamp;
         }
 
         if (isSameAddress(to, pool) && tokenSymbol === "fUNI-V2") {
-          //lp deposit action
+          //lp deposit action - update stake amount
           stakeAmount[pool][from] = new BigNumber(
             stakeAmount[pool][from] || 0
           ).plus(value);
           stakeSum = stakeSum.plus(value);
         } else if (isSameAddress(from, pool) && tokenSymbol === "fUNI-V2") {
-          //withdraw action
+          //withdraw action - update stake amount.
           stakeAmount[pool][to] = new BigNumber(
             stakeAmount[pool][to] || 0
           ).minus(value);
           stakeSum = stakeSum.minus(value);
         }
-
-        prevTimeStamp = timeStamp;
       }
 
       if (!result.length) {
@@ -134,17 +127,18 @@ const main = async () => {
       }
     }
 
-    for (const [address, amount] of Object.entries(stakeAmount[pool])) {
-      rewardPool[pool][address] = new BigNumber(
-        rewardPool[pool][address] || 0
-      ).plus(
-        amount
-          .dividedBy(stakeSum)
-          .multipliedBy(
-            unitReward.multipliedBy(latestBlockTimestamp - prevTimeStamp)
-          )
+    if (endBlockTimestamp > prevTimeStamp) {
+      // update reward pool - (prevTimeStamp ~ endBlockTimestamp)
+      updateRewardFromStakeAmount(
+        stakeAmount[pool],
+        rewardPool[pool],
+        stakeSum.dividedBy(
+          unitReward.multipliedBy(endBlockTimestamp - prevTimeStamp)
+        )
       );
     }
+
+    // update reward pool (period / rewardTimeSum)
     for (const [address, amount] of Object.entries(rewardPool[pool])) {
       rewardPool[pool][address] = amount
         .multipliedBy(period)
@@ -152,8 +146,8 @@ const main = async () => {
     }
 
     console.log("pool: ", pool);
-    console.log("latestBlock: ", latestBlock);
-    console.log("latestBlockTimestamp: ", latestBlockTimestamp);
+    console.log("endBlock: ", endBlock);
+    console.log("endBlockTimestamp: ", endBlockTimestamp);
     console.log("stakeAmount");
     for (const [address, amount] of Object.entries(stakeAmount[pool])) {
       console.log(
@@ -245,25 +239,6 @@ const main = async () => {
       );
     });
   }
-
-  fs.writeFile(
-    "LastUpdated/last-reward-out.json",
-    JSON.stringify({
-      lastBlock: latestBlock,
-      lastBlockTimestamp: latestBlockTimestamp,
-      stake: stakeAmount,
-    }),
-    "utf8",
-    function (err) {
-      if (err) {
-        console.log(
-          "Some error occured - last-reward-out.json file either not saved or corrupted file saved."
-        );
-      } else {
-        console.log("last-reward-out.json saved!");
-      }
-    }
-  );
 };
 
 main();
