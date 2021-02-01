@@ -47,9 +47,9 @@ const updateRewardFromStakeAmount = (stakeAmount, rewardPool, rate) => {
 };
 
 const main = async () => {
-  const precision = 5;
-  const startBlock = 11688056;
-  const endBlock = 11761138;
+  const precision = 5; //precision for multisender
+  const startBlock = 11688056; //change this start block
+  const endBlock = 11761138; //change this end bock
   const { timestamp: startBlockTimestamp } = await web3.eth.getBlock(
     startBlock
   );
@@ -150,58 +150,15 @@ const main = async () => {
       rewardPoolSum = rewardPoolSum.plus(amount);
     }
 
-    let analyze = [],
-      multisend = [];
+    let multisend = [];
     Object.keys(rewardPool[pool]).forEach((key) => {
       if (!rewardPool[pool][key].isZero()) {
-        const percentage = new BigNumber(rewardPool[pool][key])
-          .dividedBy(rewardPoolSum)
-          .multipliedBy(100);
-        analyze.push({
-          name,
-          pool,
-          key,
-          deposit: web3.utils.fromWei(stakeAmount[pool][key].toFixed(0)),
-          percentage: `${percentage.toFixed(4, 0)}%`,
-          reward: rewardPool[pool][key].toString(),
-        });
         multisend.push({
           key,
           reward: rewardPool[pool][key].toFixed(precision, 1),
         });
       }
     });
-
-    jsonexport(
-      analyze,
-      {
-        rename: [
-          "Pool Name",
-          "Pool Address",
-          "User Address",
-          "Deposit Amount",
-          "Share rate",
-          "Luna Reward",
-        ],
-      },
-      function (err, csv) {
-        if (err) return console.error(err);
-        fs.writeFile(
-          `Analyze/Rewards-${name}.csv`,
-          csv,
-          "utf8",
-          function (err) {
-            if (err) {
-              console.log(
-                `Some error occured - Rewards-${name}.csv file either not saved or corrupted file saved.`
-              );
-            } else {
-              console.log(`Rewards-${name}.csv saved!`);
-            }
-          }
-        );
-      }
-    );
 
     //multisender csv
     jsonexport(multisend, { includeHeaders: false }, function (err, csv) {
